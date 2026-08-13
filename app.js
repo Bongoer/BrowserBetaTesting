@@ -31,9 +31,6 @@ const elements = {
 const physicalMobile = window.matchMedia("(max-width: 760px)");
 const displayPreference = localStorage.getItem("pocket-browser-display-v3");
 const defaultDesktop = displayPreference ? displayPreference === "desktop" : !physicalMobile.matches;
-const appBaseUrl = new URL("./", window.location.href);
-const appBasePath = appBaseUrl.pathname;
-const proxySettings = window.POCKET_BROWSER_PROXY || {};
 
 // These sites are known to reject normal cross-site framing. We still try the
 // original page briefly, then switch to compatibility mode automatically.
@@ -57,9 +54,6 @@ let activeTabId = "";
 let menuOpen = false;
 let nextTabNumber = 1;
 let toastTimer = 0;
-let smartProxyController = null;
-let smartProxyConnection = null;
-let smartProxyReady = null;
 
 function icon(name) {
   return `<svg aria-hidden="true"><use href="#i-${name}"></use></svg>`;
@@ -154,45 +148,6 @@ function youtubeEmbedUrl(url) {
   } catch { return ""; }
 }
 
-function proxyAsset(path) {
-  return new URL(path, appBaseUrl).href;
-}
-
-async function ensureSmartProxy() {
-  if (smartProxyReady) return smartProxyReady;
-  smartProxyReady = (async () => {
-    if (!window.navigator.serviceWorker) throw new Error("Service workers are unavailable");
-    if (typeof window.$scramjetLoadController !== "function" || !window.BareMux?.BareMuxConnection) {
-      throw new Error("Smart compatibility files did not load");
-    }
-
-    const { ScramjetController } = window.$scramjetLoadController();
-    smartProxyController = new ScramjetController({
-      prefix: `${appBasePath}scramjet/`,
-      files: {
-        wasm: `${appBasePath}scram/scramjet.wasm.wasm`,
-        all: `${appBasePath}scram/scramjet.all.js`,
-        sync: `${appBasePath}scram/scramjet.sync.js`,
-      },
-    });
-    await smartProxyController.init();
-    await window.navigator.serviceWorker.register(proxyAsset("proxy-sw.js"), { scope: appBasePath });
-    await window.navigator.serviceWorker.ready;
-
-    smartProxyConnection = new window.BareMux.BareMuxConnection(proxyAsset("baremux/worker.js"));
-    const transport = proxyAsset("libcurl/index.mjs");
-    const wisp = proxySettings.wisp || "wss://wisp.mercurywork.shop/";
-    if ((await smartProxyConnection.getTransport()) !== transport) {
-      await smartProxyConnection.setTransport(transport, [{ websocket: wisp }]);
-    }
-    return smartProxyController;
-  })().catch((error) => {
-    smartProxyReady = null;
-    throw error;
-  });
-  return smartProxyReady;
-}
-
 function createSurface(tab) {
   const surface = document.createElement("section");
   surface.className = "surface";
@@ -223,7 +178,6 @@ function createTab(initialAddress = "", activate = true) {
     loadingToken: 0,
     fallbackTimer: 0,
     automaticFallback: false,
-    smartFrame: null,
     frame: null,
     frameWrap: null,
     surface: null,
@@ -345,7 +299,7 @@ function renderAll() {
 }
 
 function renderLabel(type) {
-  return ({ google: "Google embed", direct: "Real site", smart: "Smart compat", recreated: "Compat fallback", home: "Auto" })[type] || "Auto";
+  return ({ google: "Google embed", direct: "Real site", recreated: "Compatibility", home: "Auto" })[type] || "Auto";
 }
 
 function setMenu(open) {
@@ -478,14 +432,6 @@ function syncObservableFrame(tab) {
 
 function handleFrameLoad(tab) {
   if (tab.id === activeTabId) setLoading(false);
-  if (tab.renderType === "smart") {
-    try {
-      const title = tab.frame.contentDocument?.title?.trim();
-      if (title) tab.title = title.slice(0, 120);
-    } catch { /* Smart navigation events still update the address. */ }
-    renderAll();
-    return;
-  }
   if (tab.renderType === "direct") {
     const observable = syncObservableFrame(tab);
     if (!tab.automaticFallback && tab.id === activeTabId && !observable) {
@@ -494,65 +440,15 @@ function handleFrameLoad(tab) {
   }
 }
 
-function syncSmartNavigation(tab, event) {
-  const eventUrl = event?.url instanceof URL ? event.url.href : String(event?.url || "");
-  if (!/^https?:\/\//i.test(eventUrl)) return;
-  const next = unwrapRedirect(eventUrl);
-  if (next !== currentAddress(tab)) {
-    tab.history = [...tab.history.slice(0, tab.historyIndex + 1), next];
-    tab.historyIndex = tab.history.length - 1;
-    tab.title = hostname(next);
-    tab.favicon = "";
-    tab.faviconDisabled = false;
-  }
-  renderAll();
-}
-
-function attachSmartFrame(tab) {
-  if (tab.smartFrame) return tab.smartFrame;
-  tab.smartFrame = smartProxyController.createFrame(tab.frame);
-  tab.smartFrame.addEventListener("urlchange", (event) => syncSmartNavigation(tab, event));
-  tab.smartFrame.addEventListener("navigate", (event) => {
-    if (event?.url) syncSmartNavigation(tab, event);
-    if (tab.id === activeTabId) setLoading(true);
-  });
-  return tab.smartFrame;
-}
-
-async function loadSmartCompatibility(tab, url, token) {
-  tab.renderType = "smart";
-  tab.title = hostname(url);
-  renderAll();
-  showStatus("Starting Smart Compatibility...", "", null, true);
-  try {
-    await ensureSmartProxy();
-    if (tab.loadingToken !== token) return;
-    prepareFrame(tab, false);
-    tab.renderType = "smart";
-    const frame = attachSmartFrame(tab);
-    frame.go(url);
-    renderAll();
-    showStatus("Smart Compatibility is running the interactive website.");
-  } catch {
-    if (tab.loadingToken !== token) return;
-    if (isGoogle(url)) {
-      loadGoogleFrame(tab, url, token);
-      showStatus("Smart Compatibility was unavailable. Google loaded with its iframe mode.");
-      return;
-    }
-    loadSnapshotCompatibility(tab, url, token);
-  }
-}
-
 function loadRecreated(tab, url, token) {
-  loadSmartCompatibility(tab, url, token);
+  loadSnapshotCompatibility(tab, url, token);
 }
 
 async function loadSnapshotCompatibility(tab, url, token) {
   tab.renderType = "recreated";
   tab.title = hostname(url);
   renderAll();
-  showStatus("Smart Compatibility was unavailable. Trying the interactive HTML fallback...", "", null, true);
+  showStatus("Loading interactive compatibility...", "", null, true);
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 18000);
   try {
@@ -609,7 +505,7 @@ function loadGoogleFrame(tab, url, token) {
 }
 
 function loadGoogle(tab, url, token) {
-  loadSmartCompatibility(tab, url, token);
+  loadGoogleFrame(tab, url, token);
 }
 
 function loadTab(tab, preference = "auto") {
@@ -659,7 +555,7 @@ function showHistory(index) {
   tab.bookmarked = false;
   hideStatus();
   renderAll();
-  if (currentAddress(tab)) loadTab(tab, tab.renderType === "smart" || tab.renderType === "recreated" ? "recreate" : "auto");
+  if (currentAddress(tab)) loadTab(tab, tab.renderType === "recreated" ? "recreate" : "auto");
 }
 
 function goHome() {
@@ -705,7 +601,7 @@ elements.forward.addEventListener("click", () => showHistory(activeTab().history
 elements.reload.addEventListener("click", () => {
   const tab = activeTab();
   if (!currentAddress(tab)) return;
-  loadTab(tab, tab.renderType === "smart" || tab.renderType === "recreated" ? "recreate" : "auto");
+  loadTab(tab, tab.renderType === "recreated" ? "recreate" : "auto");
 });
 elements.home.addEventListener("click", goHome);
 $("#brand-home").addEventListener("click", goHome);
