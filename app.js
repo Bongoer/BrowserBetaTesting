@@ -32,6 +32,45 @@ const physicalMobile = window.matchMedia("(max-width: 760px)");
 const displayPreference = localStorage.getItem("pocket-browser-display-v3");
 const defaultDesktop = displayPreference ? displayPreference === "desktop" : !physicalMobile.matches;
 
+let proxyController = null;
+let proxyConnection = null;
+let proxyReady = null;
+
+async function ensureProxy() {
+  if (proxyReady) return proxyReady;
+  proxyReady = (async () => {
+    if (!navigator.serviceWorker) throw new Error("Service workers are unavailable");
+    if (typeof window.$scramjetLoadController !== "function" || !window.BareMux?.BareMuxConnection) {
+      throw new Error("Proxy runtime did not load");
+    }
+
+    const { ScramjetController } = window.$scramjetLoadController();
+    proxyController = new ScramjetController({
+      prefix: "/proxy/",
+      files: {
+        wasm: "/proxy-assets/scram/scramjet.wasm.wasm",
+        all: "/proxy-assets/scram/scramjet.all.js",
+        sync: "/proxy-assets/scram/scramjet.sync.js",
+      },
+      flags: { rewriterLogs: false, cleanErrors: true },
+    });
+
+    await proxyController.init();
+    await navigator.serviceWorker.register("/proxy-sw.js", { scope: "/proxy/" });
+    await navigator.serviceWorker.ready;
+
+    proxyConnection = new window.BareMux.BareMuxConnection("/proxy-assets/baremux/worker.js");
+    const transport = "/proxy-assets/libcurl/index.mjs";
+    const wisp = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/wisp/`;
+    await proxyConnection.setTransport(transport, [{ wisp }]);
+    return proxyController;
+  })().catch((error) => {
+    proxyReady = null;
+    throw error;
+  });
+  return proxyReady;
+}
+
 let tabs = [];
 let activeTabId = "";
 let menuOpen = false;
@@ -101,33 +140,6 @@ function isGoogle(url) {
   catch { return false; }
 }
 
-function googleEmbedUrl(url) {
-  const target = new URL(url);
-  if (target.pathname === "/url") {
-    const destination = target.searchParams.get("q") || target.searchParams.get("url");
-    if (destination && /^https?:\/\//i.test(destination)) return destination;
-  }
-  if (target.pathname === "/search") {
-    const search = new URL("https://www.google.com/search");
-    for (const [key, value] of target.searchParams) search.searchParams.append(key, value);
-    search.searchParams.set("igu", "1");
-    return search.href;
-  }
-  if (target.pathname === "/" || target.pathname === "/webhp") return "https://www.google.com/webhp?igu=1";
-  const google = new URL(target.pathname, "https://www.google.com");
-  for (const [key, value] of target.searchParams) google.searchParams.append(key, value);
-  google.searchParams.set("igu", "1");
-  return google.href;
-}
-
-function youtubeEmbedUrl(url) {
-  try {
-    const target = new URL(url);
-    const id = target.hostname === "youtu.be" ? target.pathname.slice(1) : target.searchParams.get("v");
-    return id ? `https://www.youtube.com/embed/${encodeURIComponent(id)}` : "";
-  } catch { return ""; }
-}
-
 function createSurface(tab) {
   const surface = document.createElement("section");
   surface.className = "surface";
@@ -158,6 +170,7 @@ function createTab(initialAddress = "", activate = true) {
     loadingToken: 0,
     fallbackTimer: 0,
     automaticFallback: false,
+    proxyFrame: null,
     frame: null,
     frameWrap: null,
     surface: null,
@@ -279,7 +292,7 @@ function renderAll() {
 }
 
 function renderLabel(type) {
-  return ({ google: "Google embed", direct: "Real site", recreated: "Compatibility", home: "Auto" })[type] || "Auto";
+  return ({ proxy: "Secure proxy", direct: "Real site", home: "Auto" })[type] || "Auto";
 }
 
 function setMenu(open) {
@@ -312,82 +325,6 @@ function escapeHtml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-function bridgeScript(tab, baseUrl) {
-  return `<base href="${escapeHtml(baseUrl)}"><script>(function(){
-    var tabId=${JSON.stringify(tab.id)};
-    var proxies=[
-      function(url){return 'https://api.allorigins.win/raw?url='+encodeURIComponent(url)},
-      function(url){return 'https://corsproxy.io/?url='+encodeURIComponent(url)},
-      function(url){return 'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(url)}
-    ];
-    var nativeFetch=window.fetch;
-    function post(data){data.tabId=tabId;parent.postMessage(data,'*')}
-    function send(url){try{var next=new URL(url,document.baseURI);if(next.protocol==='http:'||next.protocol==='https:')post({type:'pocket-browser:navigate',url:next.href})}catch(e){}}
-    function requestUrl(input){try{return typeof input==='string'?new URL(input,document.baseURI).href:input instanceof Request?input.url:String(input)}catch(e){return ''}}
-    function retryFetch(url,init,index){return nativeFetch(proxies[index](url),init).catch(function(error){if(index+1>=proxies.length)throw error;return retryFetch(url,init,index+1)})}
-    if(nativeFetch){window.fetch=function(input,init){var method=(init&&init.method)||(input instanceof Request&&input.method)||'GET';var original=requestUrl(input);return nativeFetch.apply(window,arguments).catch(function(error){if(String(method).toUpperCase()!=='GET'||!/^https?:/i.test(original))throw error;var retryInit=Object.assign({},init||{},{credentials:'omit'});return retryFetch(original,retryInit,0)})}}
-    function findLink(event){var path=event.composedPath?event.composedPath():[];for(var i=0;i<path.length;i++){if(path[i]&&path[i].matches&&path[i].matches('a[href],area[href]'))return path[i]}return event.target instanceof Element?event.target.closest('a[href],area[href]'):null}
-    document.addEventListener('click',function(event){var link=findLink(event);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.hasAttribute('download'))return;var href=link.getAttribute('href');if(!href||href[0]==='#'||/^(javascript:|mailto:|tel:)/i.test(href))return;event.preventDefault();event.stopImmediatePropagation();send(link.href)},true);
-    document.addEventListener('auxclick',function(event){var link=findLink(event);if(!link||event.button!==1)return;event.preventDefault();send(link.href)},true);
-    document.addEventListener('submit',function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=='get')return;event.preventDefault();try{var next=new URL(form.action||document.baseURI,document.baseURI);new FormData(form).forEach(function(value,key){if(typeof value==='string')next.searchParams.append(key,value)});send(next.href)}catch(e){}},true);
-    try{var oldOpen=window.open;window.open=function(url){if(url){send(url);return null}return oldOpen.apply(window,arguments)}}catch(e){}
-    try{var push=history.pushState.bind(history),replace=history.replaceState.bind(history);history.pushState=function(state,title,url){if(url){send(url);return}return push(state,title,url)};history.replaceState=function(state,title,url){if(url){send(url);return}return replace(state,title,url)}}catch(e){}
-    var lastTitle='';function sendTitle(){var title=document.title||'';if(title===lastTitle)return;lastTitle=title;post({type:'pocket-browser:title',title:title})}
-    document.addEventListener('DOMContentLoaded',sendTitle);
-    new MutationObserver(sendTitle).observe(document.head||document.documentElement,{subtree:true,childList:true,characterData:true});
-    window.addEventListener('hashchange',function(){send(new URL(location.hash,document.baseURI).href)});
-  })();<\/script>`;
-}
-
-function absoluteAssetUrl(value, baseUrl) {
-  if (!value || /^(data:|blob:|javascript:|mailto:|tel:|#)/i.test(value.trim())) return value;
-  try { return new URL(value, baseUrl).href; }
-  catch { return value; }
-}
-
-function absolutizeSrcset(value, baseUrl) {
-  return value.split(",").map((candidate) => {
-    const parts = candidate.trim().split(/\s+/);
-    if (!parts[0]) return candidate;
-    parts[0] = absoluteAssetUrl(parts[0], baseUrl);
-    return parts.join(" ");
-  }).join(", ");
-}
-
-function injectRecreatedPage(html, tab, baseUrl) {
-  const bridge = bridgeScript(tab, baseUrl);
-  const parser = new DOMParser();
-  const documentCopy = parser.parseFromString(html, "text/html");
-
-  documentCopy.querySelectorAll("base, meta[http-equiv]").forEach((node) => {
-    const type = node.getAttribute("http-equiv")?.toLowerCase();
-    if (node.tagName === "BASE" || type === "content-security-policy" || type === "refresh") node.remove();
-  });
-
-  const attributes = [
-    ["script[src]", "src"], ["link[href]", "href"], ["img[src]", "src"],
-    ["source[src]", "src"], ["video[src]", "src"], ["audio[src]", "src"],
-    ["track[src]", "src"], ["input[src]", "src"], ["object[data]", "data"],
-    ["form[action]", "action"], ["a[href]", "href"], ["area[href]", "href"],
-  ];
-  for (const [selector, attribute] of attributes) {
-    documentCopy.querySelectorAll(selector).forEach((node) => node.setAttribute(attribute, absoluteAssetUrl(node.getAttribute(attribute), baseUrl)));
-  }
-  documentCopy.querySelectorAll("[srcset]").forEach((node) => node.setAttribute("srcset", absolutizeSrcset(node.getAttribute("srcset"), baseUrl)));
-  const discoveredIcon = documentCopy.querySelector('link[rel~="icon" i][href]');
-  if (discoveredIcon) {
-    tab.favicon = discoveredIcon.href;
-    tab.faviconDisabled = false;
-  }
-
-  const compatibilityPolicy = documentCopy.createElement("meta");
-  compatibilityPolicy.httpEquiv = "Content-Security-Policy";
-  compatibilityPolicy.content = "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; img-src * data: blob:; media-src * data: blob:; connect-src * data: blob:; font-src * data:; frame-src * data: blob:; worker-src * data: blob:;";
-  documentCopy.head.prepend(compatibilityPolicy);
-  documentCopy.head.insertAdjacentHTML("afterbegin", bridge);
-  return `<!doctype html>${documentCopy.documentElement.outerHTML}`;
-}
-
 function prepareFrame(tab, sandboxed) {
   window.clearTimeout(tab.fallbackTimer);
   tab.fallbackTimer = 0;
@@ -418,72 +355,73 @@ function syncObservableFrame(tab) {
 
 function handleFrameLoad(tab) {
   if (tab.id === activeTabId) setLoading(false);
+  if (tab.renderType === "proxy") {
+    try {
+      const title = tab.frame.contentDocument?.title?.trim();
+      if (title) tab.title = title.slice(0, 120);
+      const iconLink = tab.frame.contentDocument?.querySelector('link[rel~="icon" i][href]');
+      if (iconLink?.href) {
+        tab.favicon = iconLink.href;
+        tab.faviconDisabled = false;
+      }
+    } catch { /* Proxy navigation events still update the URL. */ }
+    renderAll();
+    return;
+  }
   if (tab.renderType === "direct") {
     const observable = syncObservableFrame(tab);
     if (!tab.automaticFallback && tab.id === activeTabId && !observable) {
-      showStatus("Real website loaded. If it shows a blocked-page icon, use compatibility mode.", "Fix page", () => loadTab(tab, "recreate"));
+      showStatus("Direct iframe mode may be blocked by the website.", "Use proxy", () => loadTab(tab, "proxy"));
     }
   }
 }
 
-function loadRecreated(tab, url, token) {
-  loadSnapshotCompatibility(tab, url, token);
-}
-
-const compatibilityFetchers = [
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-];
-
-async function fetchCompatibilityCopy(makeUrl, url) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 14000);
-  try {
-    const response = await fetch(makeUrl(url), { signal: controller.signal, cache: "no-store" });
-    if (!response.ok) throw new Error(`Compatibility source returned ${response.status}`);
-    const html = await response.text();
-    if (html.length < 80 || !/<(?:!doctype|html|head|body)\b/i.test(html)) throw new Error("Invalid page copy");
-    return html;
-  } finally {
-    window.clearTimeout(timeout);
+function syncProxyNavigation(tab, event) {
+  const eventUrl = event?.url instanceof URL ? event.url.href : String(event?.url || "");
+  if (!/^https?:\/\//i.test(eventUrl)) return;
+  const next = unwrapRedirect(eventUrl);
+  if (next !== currentAddress(tab)) {
+    tab.history = [...tab.history.slice(0, tab.historyIndex + 1), next];
+    tab.historyIndex = tab.history.length - 1;
+    tab.title = hostname(next);
+    tab.favicon = "";
+    tab.faviconDisabled = false;
   }
+  renderAll();
 }
 
-async function fetchCompatibilityHtml(url) {
-  return Promise.any(compatibilityFetchers.map((makeUrl) => fetchCompatibilityCopy(makeUrl, url)));
+function attachProxyFrame(tab) {
+  if (tab.proxyFrame) return tab.proxyFrame;
+  tab.proxyFrame = proxyController.createFrame(tab.frame);
+  tab.proxyFrame.addEventListener("urlchange", (event) => syncProxyNavigation(tab, event));
+  tab.proxyFrame.addEventListener("navigate", (event) => {
+    if (event?.url) syncProxyNavigation(tab, event);
+    if (tab.id === activeTabId) setLoading(true);
+  });
+  return tab.proxyFrame;
 }
 
-function compatibilityErrorPage(url) {
-  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f7f8fc;color:#252936;font:16px system-ui;text-align:center}.box{max-width:420px;padding:28px}h2{margin:0 0 10px}p{color:#687083;line-height:1.5}</style><div class="box"><h2>Compatibility couldn't load this page</h2><p>${escapeHtml(hostname(url))} refused every available interactive page request. Use "Try real website" from the menu.</p></div>`;
-}
-
-async function loadSnapshotCompatibility(tab, url, token) {
-  tab.renderType = "recreated";
+async function loadProxy(tab, url, token) {
+  tab.renderType = "proxy";
   tab.title = hostname(url);
   renderAll();
-  showStatus("Loading interactive compatibility...", "", null, true);
+  showStatus("Connecting through the built-in proxy...", "", null, true);
   try {
-    const html = await fetchCompatibilityHtml(url);
+    await ensureProxy();
     if (tab.loadingToken !== token) return;
-    prepareFrame(tab, true);
-    tab.frame.srcdoc = injectRecreatedPage(html, tab, url);
+    prepareFrame(tab, false);
+    tab.renderType = "proxy";
+    const frame = attachProxyFrame(tab);
+    await frame.go(url);
     renderAll();
     hideStatus();
-    showStatus("Interactive HTML fallback loaded the website files.", "Try real site", () => {
-      const directToken = ++tab.loadingToken;
-      loadDirect(tab, url, directToken);
-    });
-  } catch {
+  } catch (error) {
     if (tab.loadingToken !== token) return;
     prepareFrame(tab, true);
-    tab.renderType = "recreated";
-    tab.frame.srcdoc = compatibilityErrorPage(url);
+    tab.renderType = "proxy";
+    tab.frame.srcdoc = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f7f8fc;color:#252936;font:16px system-ui;text-align:center}.box{max-width:460px;padding:28px}h2{margin:0 0 10px}p{color:#687083;line-height:1.5}</style><div class="box"><h2>Proxy connection failed</h2><p>${escapeHtml(error?.message || "The proxy server could not start")}</p></div>`;
     renderAll();
-    showStatus("Compatibility couldn't fetch this page.", "Try real website", () => {
-      const directToken = ++tab.loadingToken;
-      loadDirect(tab, url, directToken);
-    }, true);
+    showStatus("Proxy connection failed.", "Try again", () => loadTab(tab, "proxy"), true);
   }
 }
 
@@ -497,30 +435,6 @@ function loadDirect(tab, url, token = ++tab.loadingToken, afterFailure = false) 
   if (afterFailure) showStatus("Recreation services failed. Trying the website directly.", "Open directly", () => window.open(url, "_blank"));
 }
 
-function loadDirectThenCompatibility(tab, url, token) {
-  loadDirect(tab, url, token);
-  tab.automaticFallback = true;
-  showStatus("Trying the real website first...", "", null, true);
-  tab.fallbackTimer = window.setTimeout(() => {
-    if (tab.loadingToken !== token || tab.renderType !== "direct") return;
-    loadRecreated(tab, url, token);
-  }, 2600);
-}
-
-function loadGoogleFrame(tab, url, token) {
-  if (tab.loadingToken !== token) return;
-  tab.renderType = "google";
-  tab.title = "Google";
-  prepareFrame(tab, false);
-  tab.frame.src = googleEmbedUrl(url);
-  renderAll();
-  hideStatus();
-}
-
-function loadGoogle(tab, url, token) {
-  loadGoogleFrame(tab, url, token);
-}
-
 function loadTab(tab, preference = "auto") {
   const url = currentAddress(tab);
   if (!url) return;
@@ -528,13 +442,8 @@ function loadTab(tab, preference = "auto") {
   setLoading(tab.id === activeTabId);
   tab.surface.classList.add("active");
 
-  if (preference === "recreate") { loadRecreated(tab, url, token); return; }
-  if (isGoogle(url)) { loadGoogle(tab, url, token); return; }
-
-  const youtube = youtubeEmbedUrl(url);
-  if (youtube) { loadDirect(tab, youtube, token); return; }
-
-  loadDirectThenCompatibility(tab, url, token);
+  if (preference === "direct") { loadDirect(tab, url, token); return; }
+  loadProxy(tab, url, token);
 }
 
 function navigate(rawAddress, addToHistory = true, preference = "auto", targetTab = activeTab()) {
@@ -563,7 +472,7 @@ function showHistory(index) {
   tab.bookmarked = false;
   hideStatus();
   renderAll();
-  if (currentAddress(tab)) loadTab(tab, tab.renderType === "recreated" ? "recreate" : "auto");
+  if (currentAddress(tab)) loadTab(tab, tab.renderType === "direct" ? "direct" : "proxy");
 }
 
 function goHome() {
@@ -609,14 +518,14 @@ elements.forward.addEventListener("click", () => showHistory(activeTab().history
 elements.reload.addEventListener("click", () => {
   const tab = activeTab();
   if (!currentAddress(tab)) return;
-  loadTab(tab, tab.renderType === "recreated" ? "recreate" : "auto");
+  loadTab(tab, tab.renderType === "direct" ? "direct" : "proxy");
 });
 elements.home.addEventListener("click", goHome);
 $("#brand-home").addEventListener("click", goHome);
 elements.newTab.addEventListener("click", () => createTab());
 elements.menuButton.addEventListener("click", () => setMenu(!menuOpen));
 elements.desktopSwitch.addEventListener("click", toggleDesktop);
-elements.recreateView.addEventListener("click", () => { const tab = activeTab(); setMenu(false); if (currentAddress(tab)) loadTab(tab, "recreate"); });
+elements.recreateView.addEventListener("click", () => { const tab = activeTab(); setMenu(false); if (currentAddress(tab)) loadTab(tab, "proxy"); });
 elements.tryDirect.addEventListener("click", () => {
   const tab = activeTab();
   setMenu(false);
@@ -633,24 +542,6 @@ document.querySelectorAll(".quick-links button").forEach((button) => {
 
 document.addEventListener("click", (event) => {
   if (menuOpen && !elements.browserMenu.contains(event.target) && !elements.menuButton.contains(event.target)) setMenu(false);
-});
-
-window.addEventListener("message", (event) => {
-  const data = event.data;
-  if (!data || typeof data.type !== "string" || typeof data.tabId !== "string") return;
-  const tab = tabs.find((item) => item.id === data.tabId);
-  if (!tab || event.source !== tab.frame.contentWindow) return;
-  if (data.type === "pocket-browser:title") {
-    const title = typeof data.title === "string" ? data.title.trim() : "";
-    if (title && title !== tab.title) {
-      tab.title = title.slice(0, 120);
-      renderAll();
-    }
-    return;
-  }
-  if (data.type !== "pocket-browser:navigate" || typeof data.url !== "string") return;
-  activeTabId = tab.id;
-  navigate(unwrapRedirect(data.url), true, tab.renderType === "recreated" ? "recreate" : "auto", tab);
 });
 
 window.addEventListener("resize", () => {

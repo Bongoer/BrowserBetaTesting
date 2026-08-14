@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#e5ebe7">
-  <meta name="description" content="A small browser-style web app with tabs and compatibility rendering.">
+  <meta name="description" content="A browser-style web proxy powered by Scramjet and a self-hosted Wisp server.">
   <title>Pocket Browser</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
@@ -66,7 +66,7 @@
             <button class="switch" id="desktop-switch" role="switch" aria-checked="false" aria-label="Desktop site"><span></span></button>
           </div>
           <button id="try-direct"><svg><use href="#i-external"/></svg><span>Try real website</span></button>
-          <button id="recreate-view"><svg><use href="#i-refresh"/></svg><span>Smart Compatibility</span></button>
+          <button id="recreate-view"><svg><use href="#i-refresh"/></svg><span>Proxy mode</span></button>
           <div class="menu-divider"></div>
           <a class="is-hidden" id="open-direct" href="#" target="_blank" rel="noreferrer"><svg><use href="#i-external"/></svg><span>Open page directly</span></a>
         </div>
@@ -92,7 +92,7 @@
               <button data-url="https://play.fancade.com"><span class="quick-icon orange">F</span><span>Fancade</span></button>
             </div>
           </div>
-          <div class="privacy-pill"><svg><use href="#i-shield"/></svg> Compatibility ready</div>
+          <div class="privacy-pill"><svg><use href="#i-shield"/></svg> Built-in proxy ready</div>
         </div>
 
         <div class="surfaces" id="surfaces"></div>
@@ -103,9 +103,11 @@
         </div>
       </div>
     </section>
-    <p class="page-caption">POCKET BROWSER <span>•</span> GITHUB PAGES EDITION</p>
+    <p class="page-caption">POCKET BROWSER <span>•</span> PROXY EDITION</p>
   </main>
 
+  <script src="/proxy-assets/scram/scramjet.all.js"></script>
+  <script src="/proxy-assets/baremux/index.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

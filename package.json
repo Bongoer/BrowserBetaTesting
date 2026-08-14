@@ -1,0 +1,18 @@
+{
+  "name": "pocket-browser-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node setup-runtime.js && node server.js"
+  },
+  "dependencies": {
+    "@mercuryworkshop/libcurl-transport": "^1.5.1",
+    "@mercuryworkshop/scramjet": "https://github.com/MercuryWorkshop/scramjet/releases/download/v1.1.0/mercuryworkshop-scramjet-1.1.0.tgz",
+    "@mercuryworkshop/wisp-js": "^0.3.3",
+    "bare-mux-fork": "https://github.com/qerionx/bare-mux-noconsolelogs/releases/download/v2.1.8/bare-mux.tgz"
+  }
+}
