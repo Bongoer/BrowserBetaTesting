@@ -32,23 +32,6 @@ const physicalMobile = window.matchMedia("(max-width: 760px)");
 const displayPreference = localStorage.getItem("pocket-browser-display-v3");
 const defaultDesktop = displayPreference ? displayPreference === "desktop" : !physicalMobile.matches;
 
-// These sites are known to reject normal cross-site framing. We still try the
-// original page briefly, then switch to compatibility mode automatically.
-const automaticCompatibilityHosts = [
-  /(^|\.)roblox\.com$/i,
-  /(^|\.)youtube\.com$/i,
-  /(^|\.)github\.com$/i,
-  /(^|\.)instagram\.com$/i,
-  /(^|\.)facebook\.com$/i,
-  /(^|\.)reddit\.com$/i,
-  /(^|\.)tiktok\.com$/i,
-  /(^|\.)discord\.com$/i,
-  /(^|\.)netflix\.com$/i,
-  /(^|\.)amazon\.[a-z.]+$/i,
-  /(^|\.)x\.com$/i,
-  /(^|\.)twitter\.com$/i,
-];
-
 let tabs = [];
 let activeTabId = "";
 let menuOpen = false;
@@ -125,19 +108,16 @@ function googleEmbedUrl(url) {
     if (destination && /^https?:\/\//i.test(destination)) return destination;
   }
   if (target.pathname === "/search") {
-    target.searchParams.set("igu", "1");
-    return target.href;
+    const search = new URL("https://www.google.com/search");
+    for (const [key, value] of target.searchParams) search.searchParams.append(key, value);
+    search.searchParams.set("igu", "1");
+    return search.href;
   }
-  if (target.pathname === "/" || target.pathname === "/webhp") return `${target.origin}/webhp?igu=1`;
-  target.searchParams.set("igu", "1");
-  return target.href;
-}
-
-function usesAutomaticCompatibility(url) {
-  try {
-    const host = new URL(url).hostname;
-    return automaticCompatibilityHosts.some((pattern) => pattern.test(host));
-  } catch { return false; }
+  if (target.pathname === "/" || target.pathname === "/webhp") return "https://www.google.com/webhp?igu=1";
+  const google = new URL(target.pathname, "https://www.google.com");
+  for (const [key, value] of target.searchParams) google.searchParams.append(key, value);
+  google.searchParams.set("igu", "1");
+  return google.href;
 }
 
 function youtubeEmbedUrl(url) {
@@ -335,17 +315,23 @@ function escapeHtml(value) {
 function bridgeScript(tab, baseUrl) {
   return `<base href="${escapeHtml(baseUrl)}"><script>(function(){
     var tabId=${JSON.stringify(tab.id)};
-    var proxy='https://api.allorigins.win/raw?url=';
+    var proxies=[
+      function(url){return 'https://api.allorigins.win/raw?url='+encodeURIComponent(url)},
+      function(url){return 'https://corsproxy.io/?url='+encodeURIComponent(url)},
+      function(url){return 'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(url)}
+    ];
     var nativeFetch=window.fetch;
     function post(data){data.tabId=tabId;parent.postMessage(data,'*')}
     function send(url){try{var next=new URL(url,document.baseURI);if(next.protocol==='http:'||next.protocol==='https:')post({type:'pocket-browser:navigate',url:next.href})}catch(e){}}
     function requestUrl(input){try{return typeof input==='string'?new URL(input,document.baseURI).href:input instanceof Request?input.url:String(input)}catch(e){return ''}}
-    if(nativeFetch){window.fetch=function(input,init){var method=(init&&init.method)||(input instanceof Request&&input.method)||'GET';var original=requestUrl(input);return nativeFetch.apply(window,arguments).catch(function(error){if(String(method).toUpperCase()!=='GET'||!/^https?:/i.test(original))throw error;var retryInit=Object.assign({},init||{},{credentials:'omit'});return nativeFetch(proxy+encodeURIComponent(original),retryInit)})}}
+    function retryFetch(url,init,index){return nativeFetch(proxies[index](url),init).catch(function(error){if(index+1>=proxies.length)throw error;return retryFetch(url,init,index+1)})}
+    if(nativeFetch){window.fetch=function(input,init){var method=(init&&init.method)||(input instanceof Request&&input.method)||'GET';var original=requestUrl(input);return nativeFetch.apply(window,arguments).catch(function(error){if(String(method).toUpperCase()!=='GET'||!/^https?:/i.test(original))throw error;var retryInit=Object.assign({},init||{},{credentials:'omit'});return retryFetch(original,retryInit,0)})}}
     function findLink(event){var path=event.composedPath?event.composedPath():[];for(var i=0;i<path.length;i++){if(path[i]&&path[i].matches&&path[i].matches('a[href],area[href]'))return path[i]}return event.target instanceof Element?event.target.closest('a[href],area[href]'):null}
     document.addEventListener('click',function(event){var link=findLink(event);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.hasAttribute('download'))return;var href=link.getAttribute('href');if(!href||href[0]==='#'||/^(javascript:|mailto:|tel:)/i.test(href))return;event.preventDefault();event.stopImmediatePropagation();send(link.href)},true);
     document.addEventListener('auxclick',function(event){var link=findLink(event);if(!link||event.button!==1)return;event.preventDefault();send(link.href)},true);
     document.addEventListener('submit',function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=='get')return;event.preventDefault();try{var next=new URL(form.action||document.baseURI,document.baseURI);new FormData(form).forEach(function(value,key){if(typeof value==='string')next.searchParams.append(key,value)});send(next.href)}catch(e){}},true);
     try{var oldOpen=window.open;window.open=function(url){if(url){send(url);return null}return oldOpen.apply(window,arguments)}}catch(e){}
+    try{var push=history.pushState.bind(history),replace=history.replaceState.bind(history);history.pushState=function(state,title,url){if(url){send(url);return}return push(state,title,url)};history.replaceState=function(state,title,url){if(url){send(url);return}return replace(state,title,url)}}catch(e){}
     var lastTitle='';function sendTitle(){var title=document.title||'';if(title===lastTitle)return;lastTitle=title;post({type:'pocket-browser:title',title:title})}
     document.addEventListener('DOMContentLoaded',sendTitle);
     new MutationObserver(sendTitle).observe(document.head||document.documentElement,{subtree:true,childList:true,characterData:true});
@@ -444,21 +430,44 @@ function loadRecreated(tab, url, token) {
   loadSnapshotCompatibility(tab, url, token);
 }
 
+const compatibilityFetchers = [
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+];
+
+async function fetchCompatibilityCopy(makeUrl, url) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 14000);
+  try {
+    const response = await fetch(makeUrl(url), { signal: controller.signal, cache: "no-store" });
+    if (!response.ok) throw new Error(`Compatibility source returned ${response.status}`);
+    const html = await response.text();
+    if (html.length < 80 || !/<(?:!doctype|html|head|body)\b/i.test(html)) throw new Error("Invalid page copy");
+    return html;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function fetchCompatibilityHtml(url) {
+  return Promise.any(compatibilityFetchers.map((makeUrl) => fetchCompatibilityCopy(makeUrl, url)));
+}
+
+function compatibilityErrorPage(url) {
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f7f8fc;color:#252936;font:16px system-ui;text-align:center}.box{max-width:420px;padding:28px}h2{margin:0 0 10px}p{color:#687083;line-height:1.5}</style><div class="box"><h2>Compatibility couldn't load this page</h2><p>${escapeHtml(hostname(url))} refused every available interactive page request. Use "Try real website" from the menu.</p></div>`;
+}
+
 async function loadSnapshotCompatibility(tab, url, token) {
   tab.renderType = "recreated";
   tab.title = hostname(url);
   renderAll();
   showStatus("Loading interactive compatibility...", "", null, true);
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 18000);
   try {
-    const response = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: controller.signal });
-    if (!response.ok) throw new Error(`Proxy returned ${response.status}`);
-    const data = await response.json();
-    if (!data.contents || typeof data.contents !== "string") throw new Error("No page data returned");
+    const html = await fetchCompatibilityHtml(url);
     if (tab.loadingToken !== token) return;
     prepareFrame(tab, true);
-    tab.frame.srcdoc = injectRecreatedPage(data.contents, tab, url);
+    tab.frame.srcdoc = injectRecreatedPage(html, tab, url);
     renderAll();
     hideStatus();
     showStatus("Interactive HTML fallback loaded the website files.", "Try real site", () => {
@@ -467,10 +476,14 @@ async function loadSnapshotCompatibility(tab, url, token) {
     });
   } catch {
     if (tab.loadingToken !== token) return;
-    loadDirect(tab, url, token, true);
-    showStatus("Interactive compatibility failed. Keeping the real website attempt.", "Open directly", () => window.open(url, "_blank"));
-  } finally {
-    window.clearTimeout(timeout);
+    prepareFrame(tab, true);
+    tab.renderType = "recreated";
+    tab.frame.srcdoc = compatibilityErrorPage(url);
+    renderAll();
+    showStatus("Compatibility couldn't fetch this page.", "Try real website", () => {
+      const directToken = ++tab.loadingToken;
+      loadDirect(tab, url, directToken);
+    }, true);
   }
 }
 
@@ -521,12 +534,7 @@ function loadTab(tab, preference = "auto") {
   const youtube = youtubeEmbedUrl(url);
   if (youtube) { loadDirect(tab, youtube, token); return; }
 
-  if (usesAutomaticCompatibility(url)) {
-    loadDirectThenCompatibility(tab, url, token);
-    return;
-  }
-
-  loadDirect(tab, url, token);
+  loadDirectThenCompatibility(tab, url, token);
 }
 
 function navigate(rawAddress, addToHistory = true, preference = "auto", targetTab = activeTab()) {
@@ -642,7 +650,7 @@ window.addEventListener("message", (event) => {
   }
   if (data.type !== "pocket-browser:navigate" || typeof data.url !== "string") return;
   activeTabId = tab.id;
-  navigate(unwrapRedirect(data.url), true, "auto", tab);
+  navigate(unwrapRedirect(data.url), true, tab.renderType === "recreated" ? "recreate" : "auto", tab);
 });
 
 window.addEventListener("resize", () => {

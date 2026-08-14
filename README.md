@@ -15,9 +15,10 @@ Features include multiple tabs, favicons, back/forward history per tab, smooth a
 
 ## How compatibility rendering works
 
-- Normal websites try their real iframe first.
+- Normal websites try their real iframe first, then switch to interactive compatibility so links can update the address bar.
 - Google searches use Google's iframe-compatible URL.
-- Sites known to block normal framing briefly try the real page, then enter interactive compatibility reconstruction.
+- A compatibility link stays in compatibility mode instead of jumping back to the blocked real iframe.
+- Compatibility tries three page sources and does not silently switch back to a blocked iframe if they fail.
 - Compatibility reconstruction keeps page HTML, CSS, JavaScript, images, links, and GET forms where the remote site permits them.
 - If reconstruction fails, the real-site attempt remains visible.
 - All compatibility paths remain interactive.
